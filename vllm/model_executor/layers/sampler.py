@@ -3,6 +3,7 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
+import habana_frameworks.torch as htorch
 
 from vllm.model_executor.layers.ops.sample import sample as sample_triton
 from vllm.model_executor.sampling_metadata import (SamplingMetadata,
@@ -137,6 +138,7 @@ def _apply_top_k_top_p(
     top_p_mask = probs_sum <= 1 - p.unsqueeze(dim=1)
     # at least one
     top_p_mask[:, -1] = False
+    htorch.core.mark_step()
     logits_sort.masked_fill_(top_p_mask, -float("inf"))
 
     # Re-sort the probabilities.
