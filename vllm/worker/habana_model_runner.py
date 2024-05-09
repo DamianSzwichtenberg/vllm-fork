@@ -41,6 +41,8 @@ from vllm.utils import (HabanaMemoryProfiler, async_tensor_h2d,
                         is_pin_memory_available, make_tensor_with_pad,
                         maybe_expand_dim, pad_to_max_length, format_bytes)
 
+from .profiler import Profiler
+
 logger = init_logger(__name__)
 
 _PAD_SLOT_ID = -1
@@ -76,6 +78,7 @@ class HabanaModelRunner:
         self.scheduler_config = scheduler_config
         self.lora_config = lora_config
         self.is_driver_worker = is_driver_worker
+        self.profiler = Profiler()
 
         # model_config can be None in tests/samplers/test_sampler.py.
         # FIXME(woosuk): This is a hack to make the tests work. Refactor this.
@@ -628,41 +631,51 @@ class HabanaModelRunner:
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
         kv_caches: List[torch.Tensor],
     ) -> Optional[SamplerOutput]:
-        (input_tokens, input_positions, attn_metadata, sampling_metadata,
-         lora_requests,
-         lora_mapping) = self.prepare_input_tensors(seq_group_metadata_list)
+        is_prompt = any([sqm.is_prompt for sqm in seq_group_metadata_list])
+        num_seqs = len(seq_group_metadata_list)
+        event_name = 'prompt' if is_prompt else 'decode'
+        args = {'counter': {'num_seqs': num_seqs}}
 
-        if self.lora_config:
-            self.set_active_loras(lora_requests, lora_mapping)
+        with self.profiler.record_event('internal', event_name, args):
+            with self.profiler.record_event('internal', 'prepare_input_tensors'):
+                (input_tokens, input_positions, attn_metadata, sampling_metadata,
+                lora_requests,
+                lora_mapping) = self.prepare_input_tensors(seq_group_metadata_list)
 
-        # Execute the model.
-        if attn_metadata.use_cuda_graph:
-            graph_batch_size = input_tokens.shape[0]
-            graph_block_count = attn_metadata.block_tables.shape[1] 
-            graph_runner_key = (graph_batch_size, graph_block_count)
-            model_executable = self.graph_runners[graph_runner_key]
-            logger.info(f"Executing {self.graph_runner_class.__name__} with batch {graph_batch_size}, block_count {graph_block_count} (context_len up to {graph_block_count*self.block_size}, currently {torch.max(attn_metadata.context_lens).item()})")
-        else:
-            model_executable = self.model
-        hidden_states = model_executable(
-            input_ids=input_tokens,
-            positions=input_positions,
-            kv_caches=kv_caches,
-            attn_metadata=attn_metadata,
-        )
-        hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
-         # Compute the logits.
-        logits = self.model.compute_logits(hidden_states, sampling_metadata)
+            if self.lora_config:
+                self.set_active_loras(lora_requests, lora_mapping)
 
-        # Only perform sampling in the driver worker.
-        if not sampling_metadata.perform_sampling:
-            return None
-        
-        # Sample the next token.
-        output = self.model.sample(
-            logits=logits,
-            sampling_metadata=sampling_metadata,
-        )
+            # Execute the model.
+            if attn_metadata.use_cuda_graph:
+                graph_batch_size = input_tokens.shape[0]
+                graph_block_count = attn_metadata.block_tables.shape[1]
+                graph_runner_key = (graph_batch_size, graph_block_count)
+                model_executable = self.graph_runners[graph_runner_key]
+                logger.info(f"Executing {self.graph_runner_class.__name__} with batch {graph_batch_size}, block_count {graph_block_count} (context_len up to {graph_block_count*self.block_size}, currently {torch.max(attn_metadata.context_lens).item()})")
+            else:
+                model_executable = self.model
+            with self.profiler.record_event('internal', 'model_executable'):
+                hidden_states = model_executable(
+                    input_ids=input_tokens,
+                    positions=input_positions,
+                    kv_caches=kv_caches,
+                    attn_metadata=attn_metadata,
+                )
+            hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
+            # Compute the logits.
+            with self.profiler.record_event('internal', 'compute_logits'):
+                logits = self.model.compute_logits(hidden_states, sampling_metadata)
+
+            # Only perform sampling in the driver worker.
+            if not sampling_metadata.perform_sampling:
+                return None
+
+            # Sample the next token.
+            with self.profiler.record_event('internal', 'sample'):
+                output = self.model.sample(
+                    logits=logits,
+                    sampling_metadata=sampling_metadata,
+                )
         return output
 
     @torch.inference_mode()
