@@ -631,30 +631,37 @@ class HabanaModelRunner:
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
         kv_caches: List[torch.Tensor],
     ) -> Optional[SamplerOutput]:
+        event_start = self.profiler.get_timestamp_us()
         is_prompt = any([sqm.is_prompt for sqm in seq_group_metadata_list])
-        num_seqs = len(seq_group_metadata_list)
-        event_name = 'prompt' if is_prompt else 'decode'
-        args = {'counter': {'num_seqs': num_seqs}}
+        base_event_name = 'prompt' if is_prompt else 'decode'
 
-        with self.profiler.record_event('internal', event_name, args):
-            with self.profiler.record_event('internal', 'prepare_input_tensors'):
-                (input_tokens, input_positions, attn_metadata, sampling_metadata,
-                lora_requests,
-                lora_mapping) = self.prepare_input_tensors(seq_group_metadata_list)
+        with self.profiler.record_event('internal', base_event_name):
+            with self.profiler.record_event('internal',
+                                            'prepare_input_tensors'):
+                (input_tokens, input_positions, attn_metadata,
+                 sampling_metadata, lora_requests, lora_mapping
+                 ) = self.prepare_input_tensors(seq_group_metadata_list)
 
             if self.lora_config:
                 self.set_active_loras(lora_requests, lora_mapping)
 
+            num_seqs = len(seq_group_metadata_list)
             # Execute the model.
             if attn_metadata.use_cuda_graph:
-                graph_batch_size = input_tokens.shape[0]
-                graph_block_count = attn_metadata.block_tables.shape[1]
-                graph_runner_key = (graph_batch_size, graph_block_count)
+                batch_size = input_tokens.shape[0]
+                block_count = attn_metadata.block_tables.shape[1]
+                graph_runner_key = (batch_size, block_count)
                 model_executable = self.graph_runners[graph_runner_key]
-                logger.info(f"Executing {self.graph_runner_class.__name__} with batch {graph_batch_size}, block_count {graph_block_count} (context_len up to {graph_block_count*self.block_size}, currently {torch.max(attn_metadata.context_lens).item()})")
+                logger.info(
+                    f"Executing {self.graph_runner_class.__name__} with batch {batch_size}, block_count {block_count} (context_len up to {block_count*self.block_size}, currently {torch.max(attn_metadata.context_lens).item()})"
+                )
+                model_event_name = f'model_{base_event_name}_HPUGraphRunner_bs{batch_size}bc{block_count}'
             else:
+                batch_size = num_seqs
+                block_count = 0
                 model_executable = self.model
-            with self.profiler.record_event('internal', 'model_executable'):
+                model_event_name = f'model_{base_event_name}_eager_bs{batch_size}'
+            with self.profiler.record_event('internal', model_event_name):
                 hidden_states = model_executable(
                     input_ids=input_tokens,
                     positions=input_positions,
@@ -664,7 +671,8 @@ class HabanaModelRunner:
             hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
             # Compute the logits.
             with self.profiler.record_event('internal', 'compute_logits'):
-                logits = self.model.compute_logits(hidden_states, sampling_metadata)
+                logits = self.model.compute_logits(hidden_states,
+                                                   sampling_metadata)
 
             # Only perform sampling in the driver worker.
             if not sampling_metadata.perform_sampling:
@@ -676,60 +684,76 @@ class HabanaModelRunner:
                     logits=logits,
                     sampling_metadata=sampling_metadata,
                 )
+
+        event_end = self.profiler.get_timestamp_us()
+        duration = event_end - event_start
+        throughput = batch_size / (duration / 1e6)
+        throughput_effective = num_seqs / (duration / 1e6)
+        counters = {
+            'batch_size': batch_size,
+            'batch_size_effective': num_seqs,
+            'block_count': block_count,
+            'throughput': throughput,
+            'throughput_effective': throughput_effective
+        }
+        self.profiler.record_counter(event_start, counters)
+
         return output
 
     @torch.inference_mode()
     def profile_run(self) -> None:
-        # Enable top-k sampling to reflect the accurate memory usage.
-        sampling_params = SamplingParams(top_p=0.99, top_k=self.vocab_size - 1)
-        max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
-        max_num_seqs = self.scheduler_config.max_num_seqs
+        with self.profiler.record_event('internal', 'profile_run'):
+            # Enable top-k sampling to reflect the accurate memory usage.
+            sampling_params = SamplingParams(top_p=0.99,
+                                             top_k=self.vocab_size - 1)
+            max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
+            max_num_seqs = self.scheduler_config.max_num_seqs
 
-        # This represents the maximum number of different requests
-        # that will have unique loras, an therefore the max amount of memory
-        # consumption create dummy lora request copies from the lora request
-        # passed in, which contains a lora from the lora warmup path.
-        dummy_lora_requests = []
-        dummy_lora_requests_per_seq = []
-        if self.lora_config:
-            for idx in range(self.lora_config.max_loras):
-                lora_id = idx + 1
-                dummy_lora_request = LoRARequest(
-                    lora_name=f"warmup_{lora_id}",
-                    lora_int_id=lora_id,
-                    lora_local_path="/not/a/real/path",
+            # This represents the maximum number of different requests
+            # that will have unique loras, an therefore the max amount of memory
+            # consumption create dummy lora request copies from the lora request
+            # passed in, which contains a lora from the lora warmup path.
+            dummy_lora_requests = []
+            dummy_lora_requests_per_seq = []
+            if self.lora_config:
+                for idx in range(self.lora_config.max_loras):
+                    lora_id = idx + 1
+                    dummy_lora_request = LoRARequest(
+                        lora_name=f"warmup_{lora_id}",
+                        lora_int_id=lora_id,
+                        lora_local_path="/not/a/real/path",
+                    )
+                    self.lora_manager.add_dummy_lora(dummy_lora_request,
+                                                     rank=LORA_WARMUP_RANK)
+                    dummy_lora_requests.append(dummy_lora_request)
+                dummy_lora_requests_per_seq = [
+                    dummy_lora_requests[idx % len(dummy_lora_requests)]
+                    for idx in range(max_num_seqs)
+                ]
+
+            # Profile memory usage with max_num_sequences sequences and the total
+            # number of tokens equal to max_num_batched_tokens.
+            seqs: List[SequenceGroupMetadata] = []
+            for group_id in range(max_num_seqs):
+                seq_len = (max_num_batched_tokens // max_num_seqs +
+                           (group_id < max_num_batched_tokens % max_num_seqs))
+                seq_data = SequenceData([0] * seq_len)
+                seq = SequenceGroupMetadata(
+                    request_id=str(group_id),
+                    is_prompt=True,
+                    seq_data={group_id: seq_data},
+                    sampling_params=sampling_params,
+                    block_tables=None,
+                    lora_request=dummy_lora_requests_per_seq[group_id]
+                    if dummy_lora_requests_per_seq else None,
                 )
-                self.lora_manager.add_dummy_lora(dummy_lora_request,
-                                                 rank=LORA_WARMUP_RANK)
-                dummy_lora_requests.append(dummy_lora_request)
-            dummy_lora_requests_per_seq = [
-                dummy_lora_requests[idx % len(dummy_lora_requests)]
-                for idx in range(max_num_seqs)
-            ]
+                seqs.append(seq)
 
-        # Profile memory usage with max_num_sequences sequences and the total
-        # number of tokens equal to max_num_batched_tokens.
-        seqs: List[SequenceGroupMetadata] = []
-        for group_id in range(max_num_seqs):
-            seq_len = (max_num_batched_tokens // max_num_seqs +
-                       (group_id < max_num_batched_tokens % max_num_seqs))
-            seq_data = SequenceData([0] * seq_len)
-            seq = SequenceGroupMetadata(
-                request_id=str(group_id),
-                is_prompt=True,
-                seq_data={group_id: seq_data},
-                sampling_params=sampling_params,
-                block_tables=None,
-                lora_request=dummy_lora_requests_per_seq[group_id]
-                if dummy_lora_requests_per_seq else None,
-            )
-            seqs.append(seq)
-
-        # Run the model with the dummy inputs.
-        num_layers = self.model_config.get_num_layers(self.parallel_config)
-        kv_caches = [None] * num_layers
-        self.execute_model(seqs, kv_caches)
-        torch.hpu.synchronize()
+            # Run the model with the dummy inputs.
+            num_layers = self.model_config.get_num_layers(self.parallel_config)
+            kv_caches = [None] * num_layers
+            self.execute_model(seqs, kv_caches)
+            torch.hpu.synchronize()
         return
 
     def remove_all_loras(self) -> bool:

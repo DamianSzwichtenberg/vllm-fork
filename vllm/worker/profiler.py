@@ -9,6 +9,7 @@ import threading
 import time
 from contextlib import contextmanager
 
+
 class FileWriter(threading.Thread):
 
     def __init__(self, filename, event_queue):
@@ -57,9 +58,6 @@ class Profiler:
                                      self.profiling_trace_events)
             file_writer.start()
 
-    def _s_to_us(self, time):
-        return time * 1000000.0
-
     def _dump_with_sep(self, entry):
         entry = json.dumps(entry) + ','
         self.profiling_trace_events.put(entry)
@@ -74,12 +72,26 @@ class Profiler:
             'args': counter
         })
 
+    def get_timestamp_us(self):
+        return time.time() * 1000000.0
+
+    def record_counter(self, ts, counter):
+        if self.enabled:
+            self._dump_with_sep({
+                'pid': 1,
+                'tid': self.event_tid['counter'],
+                'ph': 'C',
+                'name': 'utils',
+                'ts': ts,
+                'args': counter
+            })
+
     @contextmanager
     def record_event(self, type, name, args=None):
         if self.enabled:
-            start = self._s_to_us(time.time())
+            start = self.get_timestamp_us()
             if args is not None and 'counter' in args:
-                self._dump_counter(start, args['counter'])
+                self.record_counter(start, args['counter'])
                 del args['counter']
 
             event = {
@@ -93,7 +105,7 @@ class Profiler:
             }
             yield
 
-            end = self._s_to_us(time.time())
+            end = self.get_timestamp_us()
             event['dur'] = end - start
 
             self._dump_with_sep(event)
