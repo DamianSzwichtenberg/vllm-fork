@@ -743,3 +743,7 @@ class AsyncLLMEngine:
         else:
             await self.engine.check_health_async()
         logger.debug("Health check took %fs", time.perf_counter() - t)
+
+    async def get_device_kv_cache_utilization(self) -> float:
+        """Get the device key-value cache utilization."""
+        return self.engine.get_device_kv_cache_utilization()

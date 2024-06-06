@@ -789,3 +789,8 @@ class LLMEngine:
 
     def check_health(self) -> None:
         self.model_executor.check_health()
+
+    def get_device_kv_cache_utilization(self) -> float:
+        num_all_device_blocks = self.cache_config.num_gpu_blocks
+        num_free_device_blocks = self.scheduler.block_manager.get_num_free_gpu_blocks()
+        return 1.0 - (num_free_device_blocks / num_all_device_blocks)

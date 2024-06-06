@@ -93,6 +93,12 @@ async def show_version():
     return JSONResponse(content=ver)
 
 
+@app.get("/device/kv_cache_utilization")
+async def show_device_kv_cache_utilization():
+    utilization = await engine.get_device_kv_cache_utilization()
+    return JSONResponse(content={"utilization": utilization})
+
+
 @app.post("/v1/chat/completions")
 async def create_chat_completion(request: ChatCompletionRequest,
                                  raw_request: Request):
