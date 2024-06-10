@@ -112,6 +112,17 @@ class HabanaExecutor(ExecutorBase):
             return output
 
         output = self.driver_worker.execute_model(execute_model_req)
+
+        # Log context len
+        for group_id, seq_group_metadata in enumerate(execute_model_req.seq_group_metadata_list):
+            is_prompt = seq_group_metadata.is_prompt
+            context_lengths = []
+            for seq_id, v in seq_group_metadata.seq_data.items():
+                context_lengths.append(len(v.prompt_token_ids) + len(v.output_token_ids))
+                logger.info(f"seq_group_id: {group_id}, seq_id: {seq_id}, is_prompt: {is_prompt}, context_len: {context_lengths[-1]}")
+            logger.info(f"seq_group_id: {group_id}, min_context_len: {min(context_lengths)}, max_context_len: {max(context_lengths)}")
+
+
         return output
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
