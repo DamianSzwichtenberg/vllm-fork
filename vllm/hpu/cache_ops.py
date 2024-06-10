@@ -14,7 +14,8 @@ def reshape_and_cache(key, value, key_cache, value_cache, slot_mapping, dtype, i
     block_size = key_cache.size(1)
     slot_mapping = slot_mapping.flatten()
     indices = torch.div(slot_mapping, block_size, rounding_mode="floor")
-    offsets = torch.fmod(slot_mapping, block_size)
+    # offsets = torch.fmod(slot_mapping, block_size)
+    offsets = slot_mapping - slot_mapping.div(block_size, rounding_mode="trunc") * block_size
     key_cache.index_put_((indices, offsets), key)
     value_cache.index_put_((indices, offsets), value)
 

@@ -982,6 +982,7 @@ class HabanaModelRunner:
         if os.environ.get('VLLM_SKIP_WARMUP', 'false').lower() == 'true':
             logger.info("Skipping warmup...")
             return
+        return
         self.profiler.start('internal', 'warmup')
         start_mem = HabanaMemoryProfiler.current_device_memory_usage()
         start_time = time.perf_counter()
