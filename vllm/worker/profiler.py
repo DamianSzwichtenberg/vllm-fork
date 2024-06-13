@@ -57,6 +57,7 @@ class Profiler:
         self.enabled = os.getenv('VLLM_PROFILER_ENABLED',
                                  'false').lower() == 'true' and int(
                                      os.getenv('RANK', '0')) == 0
+        logger.warn(f'Profiler enabled: {self.enabled} for HPU{self.device_id}')
         if self.enabled:
             # initialize the trace file (JSON Array Format)
             with open(self.filename, 'w') as outfile:
