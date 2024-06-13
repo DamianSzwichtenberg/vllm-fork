@@ -24,6 +24,9 @@ from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.habana_model_runner import HabanaModelRunner
 from vllm.worker.worker_base import WorkerBase
 
+from vllm.logger import init_logger
+logger = init_logger(__name__)
+
 
 class HabanaWorker(WorkerBase):
     """A worker class that executes (a partition of) the model on a HPU.
@@ -90,6 +93,7 @@ class HabanaWorker(WorkerBase):
         if self.device_config.device.type == "hpu":
             self.device = torch.device("hpu")
             torch.hpu.set_device(self.device)
+            logger.warn(f"Using HPU device: {self.device}")
         else:
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
