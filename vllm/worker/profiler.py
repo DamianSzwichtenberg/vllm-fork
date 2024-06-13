@@ -10,7 +10,7 @@ import time
 from contextlib import contextmanager
 
 from vllm.logger import init_logger
-from vllm.utils import random_uuid
+from vllm.utils import get_vllm_instance_id
 
 logger = init_logger(__name__)
 
@@ -48,14 +48,15 @@ class FileWriter(threading.Thread):
 class Profiler:
     profiling_trace_events = queue.Queue()
     event_tid = {'counter': 1, 'external': 2, 'internal': 3}
-    filename = f'server_events_{random_uuid()}.json'
+    vllm_instance_id = get_vllm_instance_id()
+    filename = f'server_events_{vllm_instance_id}.json'
     event_cache = []
 
     def __init__(self):
         self.enabled = os.getenv('VLLM_PROFILER_ENABLED',
                                  'false').lower() == 'true' and int(
                                      os.getenv('RANK', '0')) == 0
-        logger.warn(f'Profiler enabled: {self.enabled} for HPU{self.device_id}')
+        logger.info(f'Profiler enabled for: {self.vllm_instance_id}')
         if self.enabled:
             # initialize the trace file (JSON Array Format)
             with open(self.filename, 'w') as outfile:
