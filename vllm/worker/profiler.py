@@ -9,9 +9,8 @@ import threading
 import time
 from contextlib import contextmanager
 
-import habana_frameworks.torch as htorch
-
 from vllm.logger import init_logger
+from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
@@ -49,8 +48,7 @@ class FileWriter(threading.Thread):
 class Profiler:
     profiling_trace_events = queue.Queue()
     event_tid = {'counter': 1, 'external': 2, 'internal': 3}
-    device_id = htorch.hpu.current_device()
-    filename = f'server_events_hpu{device_id}.json'
+    filename = f'server_events_{random_uuid()}.json'
     event_cache = []
 
     def __init__(self):
