@@ -9,11 +9,16 @@ from vllm.lora.request import LoRARequest
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
                         make_async, HabanaMemoryProfiler, format_bytes)
+import asyncio
 import os
 import contextlib
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
+from typing import Callable, TypeVar, Awaitable
 from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
+T = TypeVar('T')
 
 
 class HabanaExecutor(ExecutorBase):
@@ -138,12 +143,29 @@ class HabanaExecutor(ExecutorBase):
         self.shutdown()
 
 
+habana_thread_executor = ThreadPoolExecutor(max_workers=1)
+def habana_make_async(func: Callable[..., T]) -> Callable[..., Awaitable[T]]:
+    """Take a blocking function, and run it on in an executor thread.
+
+    This function prevents the blocking function from blocking the
+    asyncio event loop.
+    The code in this function needs to be thread safe.
+    """
+
+    def _async_wrapper(*args, **kwargs) -> asyncio.Future:
+        loop = asyncio.get_event_loop()
+        p_func = partial(func, *args, **kwargs)
+        return loop.run_in_executor(executor=habana_thread_executor, func=p_func)
+
+    return _async_wrapper
+
+
 class HabanaExecutorAsync(HabanaExecutor, ExecutorAsyncBase):
 
     async def execute_model_async(
         self,
         execute_model_req: ExecuteModelRequest,
     ) -> List[SamplerOutput]:
-        output = await make_async(self.driver_worker.execute_model
-                                  )(execute_model_req=execute_model_req, )
+        output = await habana_make_async(self.driver_worker.execute_model
+                                        )(execute_model_req=execute_model_req, )
         return output
