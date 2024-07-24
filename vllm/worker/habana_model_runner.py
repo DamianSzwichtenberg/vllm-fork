@@ -1235,6 +1235,8 @@ class HabanaModelRunner:
         if not self.skip_non_graph_warmup:
             self.warmup_all_buckets(self.prompt_buckets, True, kv_caches)
             self.warmup_all_buckets(self.decode_buckets, False, kv_caches)
+        else:
+            logger.info('Skipping non-graph warmup...')
 
         if not self.enforce_eager:
             mem_margin = 1.0 - float(os.environ.get('VLLM_GRAPH_MEM_MARGIN', '0.02'))
