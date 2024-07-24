@@ -391,6 +391,7 @@ class HabanaModelRunner:
 
         self._setup_buckets()
         self.skip_warmup = os.environ.get('VLLM_SKIP_WARMUP', 'false').lower() == 'true'
+        self.skip_non_graph_warmup = os.environ.get('VLLM_SKIP_NON_GRAPH_WARMUP', 'false').lower() == 'true'
 
     def load_model(self) -> None:
         with HabanaMemoryProfiler() as m:
@@ -1231,8 +1232,9 @@ class HabanaModelRunner:
 
         start_mem = HabanaMemoryProfiler.current_device_memory_usage()
         start_time = time.perf_counter()
-        self.warmup_all_buckets(self.prompt_buckets, True, kv_caches)
-        self.warmup_all_buckets(self.decode_buckets, False, kv_caches)
+        if not self.skip_non_graph_warmup:
+            self.warmup_all_buckets(self.prompt_buckets, True, kv_caches)
+            self.warmup_all_buckets(self.decode_buckets, False, kv_caches)
 
         if not self.enforce_eager:
             mem_margin = 1.0 - float(os.environ.get('VLLM_GRAPH_MEM_MARGIN', '0.02'))
